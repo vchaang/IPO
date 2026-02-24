@@ -62,7 +62,11 @@ class IPOCatalystTracker:
         # Added a 3-attempt retry loop just in case Yahoo is being extra stubborn
         for attempt in range(3):
             try:
-                self.stock_info = self.stock.info
+                # yfinance sometimes returns None instead of a dictionary if data is missing/blocked. 
+                # We force it to be an empty dict to prevent AttributeError crashes.
+                info = self.stock.info
+                self.stock_info = info if info is not None else {}
+                
                 hist = self.stock.history(period="max")
                 if hist.empty:
                     return False, f"No trading data found for {self.ticker}."
