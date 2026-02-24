@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import requests
 import time
 from datetime import timedelta, datetime
 
@@ -53,16 +52,8 @@ class IPOCatalystTracker:
     def __init__(self, ticker):
         self.ticker = ticker.upper()
         
-        # Create a custom session to bypass Yahoo's bot-blocking rate limits
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive"
-        })
-        
-        self.stock = yf.Ticker(self.ticker, session=self.session)
+        # We now let yfinance handle the session mapping natively to avoid the curl_cffi error
+        self.stock = yf.Ticker(self.ticker)
         self.stock_info = {}
         self.ipo_date = None
         self.current_year = datetime.now().year
