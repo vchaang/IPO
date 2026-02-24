@@ -111,6 +111,14 @@ class IPOCatalystTracker:
             "Quiet Period (T+25)": self.ipo_date + timedelta(days=25),
             "Lock-Up Expiry (T+180)": self.ipo_date + timedelta(days=180)
         }
+        
+    def get_funds(self):
+        """Safely fetches mutual fund holders to prevent rate-limit crashes."""
+        try:
+            return self.stock.mutualfund_holders
+        except Exception:
+            # If Yahoo rate-limits this specific call, fail gracefully
+            return None
 
 # --- UI LAYOUT ---
 st.title("Post-IPO Catalyst & Flow Tracker")
@@ -190,14 +198,16 @@ if ticker_input:
                 st.subheader("Top Passive Institutional Holders")
                 st.markdown(f"<p style='color: #888; font-size: 14px;'>{tracker.ticker} has been public for >1 year. Mechanical lock-ups are irrelevant. The funds listed below control the daily passive flows.</p>", unsafe_allow_html=True)
                 
-                funds = tracker.stock.mutualfund_holders
+                # Use our new safe wrapper function!
+                funds = tracker.get_funds()
+                
                 if funds is not None and not funds.empty:
                     funds_clean = funds.head(5)[['Holder', 'pctHeld']]
                     funds_clean['pctHeld'] = (funds_clean['pctHeld'] * 100).round(2).astype(str) + '%'
                     funds_clean.columns = ['Fund Name', '% of Float Owned']
                     st.table(funds_clean)
                 else:
-                    st.warning("Fund data temporarily unavailable.")
+                    st.warning("Fund data temporarily unavailable due to rate limits from data provider.")
             else:
                 st.subheader("Predictive Index Inclusion Targets")
                 st.write("")
