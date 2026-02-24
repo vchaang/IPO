@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import time
+import requests
 from datetime import timedelta, datetime
 
 # --- PAGE CONFIG ---
@@ -48,24 +49,47 @@ st.markdown("""
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker):
     stock = yf.Ticker(ticker)
+    hist_max = pd.DataFrame()
     
     # 1. Fetch History (Our primary source of truth)
-    hist_max = stock.history(period="max")
-    if hist_max.empty:
-        return False, f"No trading data found for {ticker}.", None, None, None, None
+    # We wrap this in a try-except because Streamlit Cloud frequently gets YFRateLimitErrors
+    try:
+        hist_max = stock.history(period="max")
+    except Exception:
+        pass # Ignore the crash, we will use the raw fallback below
+        
+    # 2. RAW HTTP FALLBACK: If yfinance is blocked, we fetch directly from Yahoo's backend
+    if hist_max is None or hist_max.empty:
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=max&interval=1d"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'}
+            res = requests.get(url, headers=headers, timeout=5)
+            
+            if res.status_code == 200:
+                data = res.json()
+                timestamps = data['chart']['result'][0]['timestamp']
+                closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+                # Create a perfectly formatted dataframe from the raw data
+                hist_max = pd.DataFrame({'Close': closes}, index=pd.to_datetime(timestamps, unit='s', utc=True))
+        except Exception:
+            pass
+
+    # If even the fallback fails, return a polite error instead of a crashed app
+    if hist_max is None or hist_max.empty:
+        return False, f"Data completely blocked by Yahoo for {ticker}. Please try again later.", None, None, None, None
         
     ipo_date = hist_max.index.min().date()
     
-    # 2. Fetch Info (Silently catch rate limits)
+    # 3. Fetch Info (Silently catch rate limits)
     try:
         stock_info = stock.info or {}
-    except:
+    except Exception:
         stock_info = {}
         
-    # 3. Fetch Fast Info for backup Market Cap
+    # 4. Fetch Fast Info for backup Market Cap
     try:
         fast_mcap = stock.fast_info.get('marketCap', 0)
-    except:
+    except Exception:
         fast_mcap = 0
         
     return True, "Success", hist_max, stock_info, ipo_date, fast_mcap
@@ -74,7 +98,7 @@ def fetch_stock_data(ticker):
 def fetch_funds(ticker):
     try:
         return yf.Ticker(ticker).mutualfund_holders
-    except:
+    except Exception:
         return None
 
 # --- METRICS CALCULATOR ---
@@ -83,28 +107,29 @@ def calculate_metrics(hist_max):
     if hist_max is None or hist_max.empty:
         return 0, 0, "N/A", "N/A"
         
-    current_price = hist_max['Close'].iloc[-1]
-    prev_close = hist_max['Close'].iloc[-2] if len(hist_max) > 1 else current_price
+    current_price = float(hist_max['Close'].iloc[-1])
+    prev_close = float(hist_max['Close'].iloc[-2]) if len(hist_max) > 1 else current_price
     
     # YTD
     ytd_data = hist_max[hist_max.index.year == current_year]
     if not ytd_data.empty:
-        first_ytd = ytd_data['Close'].iloc[0]
+        first_ytd = float(ytd_data['Close'].iloc[0])
         ytd_val = ((current_price - first_ytd) / first_ytd) * 100
         ytd_return = f"{ytd_val:+.2f}%"
     else:
         ytd_return = "N/A"
         
-    # 1-Year
-    one_year_ago = pd.Timestamp.now(tz=hist_max.index.tz) - pd.Timedelta(days=365)
+    # 1-Year (Handles timezone differences safely)
+    now_ts = pd.Timestamp.now(tz=hist_max.index.tz) if hasattr(hist_max.index, 'tz') else pd.Timestamp.now()
+    one_year_ago = now_ts - pd.Timedelta(days=365)
     past_data = hist_max[hist_max.index <= one_year_ago]
     
     if not past_data.empty:
-        first_1y = past_data['Close'].iloc[-1]
+        first_1y = float(past_data['Close'].iloc[-1])
         one_yr_val = ((current_price - first_1y) / first_1y) * 100
         one_yr_return = f"{one_yr_val:+.2f}%" if len(hist_max) >= 250 else f"{one_yr_val:+.2f}% (Since IPO)"
     else:
-        first_ipo = hist_max['Close'].iloc[0]
+        first_ipo = float(hist_max['Close'].iloc[0])
         one_yr_val = ((current_price - first_ipo) / first_ipo) * 100
         one_yr_return = f"{one_yr_val:+.2f}% (Since IPO)"
 
