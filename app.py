@@ -36,110 +36,89 @@ st.markdown("""
         font-weight: 300; 
         letter-spacing: -0.5px; 
     }
-    .pos-return { color: #5C946E !important; } /* Muted sage green */
-    .neg-return { color: #C96464 !important; } /* Muted rose red */
-    
-    /* Clean up default Streamlit elements */
-    h1, h2, h3 {
-        font-weight: 400 !important;
-        letter-spacing: -0.5px;
-    }
+    .pos-return { color: #5C946E !important; }
+    .neg-return { color: #C96464 !important; }
+    h1, h2, h3 { font-weight: 400 !important; letter-spacing: -0.5px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- CORE LOGIC ---
-class IPOCatalystTracker:
-    def __init__(self, ticker):
-        self.ticker = ticker.upper()
+# --- CACHED DATA FETCHING ---
+# The @st.cache_data decorator saves the result for 1 hour (3600 seconds).
+# This prevents Yahoo from blocking the app due to too many requests!
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_stock_data(ticker):
+    stock = yf.Ticker(ticker)
+    
+    # 1. Fetch History (Our primary source of truth)
+    hist_max = stock.history(period="max")
+    if hist_max.empty:
+        return False, f"No trading data found for {ticker}.", None, None, None, None
         
-        # We now let yfinance handle the session mapping natively to avoid the curl_cffi error
-        self.stock = yf.Ticker(self.ticker)
-        self.stock_info = {}
-        self.hist_max = pd.DataFrame()
-        self.ipo_date = None
-        self.current_year = datetime.now().year
-
-    def fetch_data(self):
-        try:
-            # The screenshot proves Yahoo allows the .history() chart endpoint, but blocks the .info endpoint!
-            # So we fetch historical data first and use it as our absolute source of truth for pricing.
-            self.hist_max = self.stock.history(period="max")
-            
-            if self.hist_max.empty:
-                return False, f"No trading data found for {self.ticker}."
-                
-            self.ipo_date = self.hist_max.index.min().date()
-            
-            # Put .info in a silent try/except. If Yahoo rate-limits it, we just ignore it!
-            try:
-                self.stock_info = self.stock.info or {}
-            except:
-                self.stock_info = {}
-                
-            return True, "Success"
-        except Exception as e:
-            return False, f"Data fetch error: {str(e)}"
-
-    def get_metrics(self):
-        # We derive ALL pricing mathematically from the historical chart, completely bypassing the blocked .info endpoint
-        if self.hist_max.empty:
-            return 0, 0, "N/A", "N/A", 0, 0
-            
-        current_price = self.hist_max['Close'].iloc[-1]
-        prev_close = self.hist_max['Close'].iloc[-2] if len(self.hist_max) > 1 else current_price
+    ipo_date = hist_max.index.min().date()
+    
+    # 2. Fetch Info (Silently catch rate limits)
+    try:
+        stock_info = stock.info or {}
+    except:
+        stock_info = {}
         
-        # YTD calculation
-        ytd_data = self.hist_max[self.hist_max.index.year == self.current_year]
-        if not ytd_data.empty:
-            first_ytd = ytd_data['Close'].iloc[0]
-            ytd_val = ((current_price - first_ytd) / first_ytd) * 100
-            ytd_return = f"{ytd_val:+.2f}%"
-        else:
-            ytd_val = 0
-            ytd_return = "N/A"
-            
-        # 1-Year calculation
-        one_year_ago = pd.Timestamp.now(tz=self.hist_max.index.tz) - pd.Timedelta(days=365)
-        past_data = self.hist_max[self.hist_max.index <= one_year_ago]
+    # 3. Fetch Fast Info for backup Market Cap
+    try:
+        fast_mcap = stock.fast_info.get('marketCap', 0)
+    except:
+        fast_mcap = 0
         
-        if not past_data.empty:
-            first_1y = past_data['Close'].iloc[-1]
-            one_yr_val = ((current_price - first_1y) / first_1y) * 100
-            one_yr_return = f"{one_yr_val:+.2f}%" if len(self.hist_max) >= 250 else f"{one_yr_val:+.2f}% (Since IPO)"
-        else:
-            first_ipo = self.hist_max['Close'].iloc[0]
-            one_yr_val = ((current_price - first_ipo) / first_ipo) * 100
-            one_yr_return = f"{one_yr_val:+.2f}% (Since IPO)"
+    return True, "Success", hist_max, stock_info, ipo_date, fast_mcap
 
-        return current_price, prev_close, ytd_return, one_yr_return, ytd_val, one_yr_val
+@st.cache_data(ttl=86400, show_spinner=False) # Cache funds for 24 hours
+def fetch_funds(ticker):
+    try:
+        return yf.Ticker(ticker).mutualfund_holders
+    except:
+        return None
 
-    def get_mechanical_deadlines(self):
-        if not self.ipo_date: return {}
-        return {
-            "IPO Pricing / First Trade": self.ipo_date,
-            "Quiet Period (T+25)": self.ipo_date + timedelta(days=25),
-            "Lock-Up Expiry (T+180)": self.ipo_date + timedelta(days=180)
-        }
+# --- METRICS CALCULATOR ---
+def calculate_metrics(hist_max):
+    current_year = datetime.now().year
+    if hist_max is None or hist_max.empty:
+        return 0, 0, "N/A", "N/A"
         
-    def get_funds(self):
-        """Safely fetches mutual fund holders to prevent rate-limit crashes."""
-        try:
-            return self.stock.mutualfund_holders
-        except Exception:
-            # If Yahoo rate-limits this specific call, fail gracefully
-            return None
+    current_price = hist_max['Close'].iloc[-1]
+    prev_close = hist_max['Close'].iloc[-2] if len(hist_max) > 1 else current_price
+    
+    # YTD
+    ytd_data = hist_max[hist_max.index.year == current_year]
+    if not ytd_data.empty:
+        first_ytd = ytd_data['Close'].iloc[0]
+        ytd_val = ((current_price - first_ytd) / first_ytd) * 100
+        ytd_return = f"{ytd_val:+.2f}%"
+    else:
+        ytd_return = "N/A"
+        
+    # 1-Year
+    one_year_ago = pd.Timestamp.now(tz=hist_max.index.tz) - pd.Timedelta(days=365)
+    past_data = hist_max[hist_max.index <= one_year_ago]
+    
+    if not past_data.empty:
+        first_1y = past_data['Close'].iloc[-1]
+        one_yr_val = ((current_price - first_1y) / first_1y) * 100
+        one_yr_return = f"{one_yr_val:+.2f}%" if len(hist_max) >= 250 else f"{one_yr_val:+.2f}% (Since IPO)"
+    else:
+        first_ipo = hist_max['Close'].iloc[0]
+        one_yr_val = ((current_price - first_ipo) / first_ipo) * 100
+        one_yr_return = f"{one_yr_val:+.2f}% (Since IPO)"
+
+    return current_price, prev_close, ytd_return, one_yr_return
 
 # --- UI LAYOUT ---
 st.title("Post-IPO Catalyst & Flow Tracker")
 st.markdown("<p style='color: #888; font-size: 16px; font-weight: 300;'>Predictive Index Inclusion & IPO Lock-up Mapping</p>", unsafe_allow_html=True)
-st.write("") # Spacing
+st.write("")
 
-# Add a two-column layout for the search bar and the new sector override
+# Inputs
 col_search, col_override = st.columns([2, 1])
-
 with col_search:
     ticker_input = st.text_input("Enter Ticker (e.g. EIKN, ARM, AAPL)", "")
-
 with col_override:
     sector_override = st.selectbox(
         "Sector (Use if Auto-Detect fails)", 
@@ -147,33 +126,27 @@ with col_override:
     )
 
 if ticker_input:
-    with st.spinner(f"Pulling live market data for {ticker_input.upper()}..."):
-        tracker = IPOCatalystTracker(ticker_input)
-        success, msg = tracker.fetch_data()
+    ticker = ticker_input.upper().strip()
+    with st.spinner(f"Pulling optimized market data for {ticker}..."):
+        
+        # Call our new, super-fast cached functions!
+        success, msg, hist_max, stock_info, ipo_date, fast_mcap = fetch_stock_data(ticker)
         
         if not success:
             st.error(msg)
         else:
-            # 1. Profile Data
-            sector = tracker.stock_info.get('sector', 'Unknown')
-            industry = tracker.stock_info.get('industry', 'Unknown')
+            # Profile Data
+            sector = stock_info.get('sector', 'Unknown')
+            industry = stock_info.get('industry', 'Unknown')
             
-            # Apply Sector Override visually if user selected one
             display_sector = sector
             if sector == 'Unknown' and sector_override != "Auto-Detect":
                 display_sector = f"Manual: {sector_override}"
             
-            # Try stock_info first, fallback to fast_info to bypass block
-            mcap = tracker.stock_info.get('marketCap', 0)
-            if not mcap:
-                try:
-                    mcap = tracker.stock.fast_info['marketCap']
-                except:
-                    mcap = 0
-                    
+            mcap = stock_info.get('marketCap', fast_mcap)
             mcap_str = f"${mcap / 1e9:.2f}B" if mcap else "Unknown"
             
-            days_public = (datetime.now().date() - tracker.ipo_date).days
+            days_public = (datetime.now().date() - ipo_date).days
             is_mature = days_public > 365
             status_badge = "Mature Company" if is_mature else "Recent IPO"
 
@@ -181,10 +154,9 @@ if ticker_input:
             
             # Top Row: Info & Prices
             col1, col2 = st.columns([1, 2])
-            
             with col1:
-                st.subheader(f"{tracker.ticker} Profile")
-                st.caption(tracker.stock_info.get('shortName', 'Company Name'))
+                st.subheader(f"{ticker} Profile")
+                st.caption(stock_info.get('shortName', 'Company Name'))
                 st.markdown(f"**Status:** {status_badge}")
                 st.markdown(f"**Sector:** {display_sector}")
                 st.markdown(f"**Industry:** {industry}")
@@ -192,10 +164,9 @@ if ticker_input:
                 
             with col2:
                 st.subheader("Price & Performance")
-                cp, pc, ytd, oyr, ytd_v, oyr_v = tracker.get_metrics()
+                cp, pc, ytd, oyr = calculate_metrics(hist_max)
                 
                 m1, m2, m3, m4 = st.columns(4)
-                
                 m1.metric("Current Price", f"${cp:.2f}" if cp else "N/A", f"{cp - pc:+.2f}" if cp and pc else None)
                 m2.metric("Previous Close", f"${pc:.2f}" if pc else "N/A")
                 m3.metric("YTD Return", ytd)
@@ -206,7 +177,12 @@ if ticker_input:
             # Middle Row: Deadlines
             st.subheader("Mechanical & Regulatory Deadlines")
             st.write("")
-            deadlines = tracker.get_mechanical_deadlines()
+            
+            deadlines = {
+                "IPO Pricing / First Trade": ipo_date,
+                "Quiet Period (T+25)": ipo_date + timedelta(days=25),
+                "Lock-Up Expiry (T+180)": ipo_date + timedelta(days=180)
+            }
             
             d_cols = st.columns(3)
             for idx, (event, date) in enumerate(deadlines.items()):
@@ -228,10 +204,10 @@ if ticker_input:
             # Bottom Row: Index Logic
             if is_mature:
                 st.subheader("Top Passive Institutional Holders")
-                st.markdown(f"<p style='color: #888; font-size: 14px;'>{tracker.ticker} has been public for >1 year. Mechanical lock-ups are irrelevant. The funds listed below control the daily passive flows.</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color: #888; font-size: 14px;'>{ticker} has been public for >1 year. Mechanical lock-ups are irrelevant. The funds listed below control the daily passive flows.</p>", unsafe_allow_html=True)
                 
-                # Use our new safe wrapper function!
-                funds = tracker.get_funds()
+                # Fetch cached funds
+                funds = fetch_funds(ticker)
                 
                 if funds is not None and not funds.empty:
                     funds_clean = funds.head(5)[['Holder', 'pctHeld']]
@@ -245,9 +221,8 @@ if ticker_input:
                 st.write("")
                 
                 inclusions = []
-                ipo_month = tracker.ipo_date.month
+                ipo_month = ipo_date.month
                 
-                # Logic
                 if ipo_month <= 4: 
                     inclusions.append({"Index": "Russell 2000/3000", "Target": "Late June", "Prob": "High", "Rationale": "Eligible for the June Reconstitution."})
                 elif ipo_month <= 10: 
@@ -255,9 +230,8 @@ if ticker_input:
                 
                 inclusions.append({"Index": "CRSP US Total Market (VTI)", "Target": "Next Quarterly Rebalance", "Prob": "High", "Rationale": "Quarterly rebalance inclusion."})
                 inclusions.append({"Index": "MSCI USA IMI", "Target": "Next Index Review", "Prob": "High" if mcap >= 1e9 else "Medium", "Rationale": "Quarterly/Semi-Annual reviews based on liquidity/cap."})
-                inclusions.append({"Index": "S&P Composite 1500", "Target": f"After {(tracker.ipo_date + timedelta(days=365)).strftime('%b %Y')}", "Prob": "Low", "Rationale": "Requires 12 months seasoning + GAAP profitability."})
+                inclusions.append({"Index": "S&P Composite 1500", "Target": f"After {(ipo_date + timedelta(days=365)).strftime('%b %Y')}", "Prob": "Low", "Rationale": "Requires 12 months seasoning + GAAP profitability."})
                 
-                # Dynamic Logic based on user override or auto-detect
                 is_biotech = False
                 is_tech = False
                 
@@ -275,5 +249,4 @@ if ticker_input:
                 elif is_tech or (not is_biotech and sector_override == "Auto-Detect"):
                     inclusions.append({"Index": "Nasdaq 100 (QQQ)", "Target": "Standard or Fast Entry (15 Days)", "Prob": "Varies", "Rationale": "Standard requires 3mo seasoning. Mega-caps fast-track in 15 days."})
 
-                df_inc = pd.DataFrame(inclusions)
-                st.table(df_inc)
+                st.table(pd.DataFrame(inclusions))
