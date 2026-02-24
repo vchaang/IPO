@@ -248,12 +248,14 @@ if ticker_input:
                 ipo_month = tracker.ipo_date.month
                 
                 # Logic
-                if ipo_month <= 4: inclusions.append({"Index": "Russell 2000/3000", "Target": "Late June", "Prob": "High"})
-                elif ipo_month <= 10: inclusions.append({"Index": "Russell 2000/3000", "Target": "Dec 11", "Prob": "High"})
+                if ipo_month <= 4: 
+                    inclusions.append({"Index": "Russell 2000/3000", "Target": "Late June", "Prob": "High", "Rationale": "Eligible for the June Reconstitution."})
+                elif ipo_month <= 10: 
+                    inclusions.append({"Index": "Russell 2000/3000", "Target": "Dec 11", "Prob": "High", "Rationale": "Eligible for the December Semi-Annual Reconstitution."})
                 
-                inclusions.append({"Index": "CRSP US Total Market (VTI)", "Target": "Next Quarterly Rebalance", "Prob": "High"})
-                inclusions.append({"Index": "MSCI USA IMI", "Target": "Next Index Review", "Prob": "High" if mcap >= 1e9 else "Medium"})
-                inclusions.append({"Index": "S&P Composite 1500", "Target": f"After {(tracker.ipo_date + timedelta(days=365)).strftime('%b %Y')}", "Prob": "Low"})
+                inclusions.append({"Index": "CRSP US Total Market (VTI)", "Target": "Next Quarterly Rebalance", "Prob": "High", "Rationale": "Quarterly rebalance inclusion."})
+                inclusions.append({"Index": "MSCI USA IMI", "Target": "Next Index Review", "Prob": "High" if mcap >= 1e9 else "Medium", "Rationale": "Quarterly/Semi-Annual reviews based on liquidity/cap."})
+                inclusions.append({"Index": "S&P Composite 1500", "Target": f"After {(tracker.ipo_date + timedelta(days=365)).strftime('%b %Y')}", "Prob": "Low", "Rationale": "Requires 12 months seasoning + GAAP profitability."})
                 
                 # Dynamic Logic based on user override or auto-detect
                 is_biotech = False
@@ -268,10 +270,10 @@ if ticker_input:
                     is_tech = sector in ['Technology', 'Communication Services', 'Consumer Discretionary']
 
                 if is_biotech:
-                    inclusions.append({"Index": "S&P Biotech (XBI)", "Target": "Next Quarterly Rebalance", "Prob": "High"})
-                    inclusions.append({"Index": "Nasdaq Biotech (NBI)", "Target": "December (Annual)", "Prob": "High"})
+                    inclusions.append({"Index": "S&P Biotech (XBI)", "Target": "Next Quarterly Rebalance", "Prob": "High", "Rationale": "Requires 1-2 months seasoning."})
+                    inclusions.append({"Index": "Nasdaq Biotech (NBI)", "Target": "December (Annual)", "Prob": "High", "Rationale": "Annual December reconstitution."})
                 elif is_tech or (not is_biotech and sector_override == "Auto-Detect"):
-                    inclusions.append({"Index": "Nasdaq 100 (QQQ)", "Target": "Standard or Fast Entry (15 Days)", "Prob": "Varies"})
+                    inclusions.append({"Index": "Nasdaq 100 (QQQ)", "Target": "Standard or Fast Entry (15 Days)", "Prob": "Varies", "Rationale": "Standard requires 3mo seasoning. Mega-caps fast-track in 15 days."})
 
                 df_inc = pd.DataFrame(inclusions)
                 st.table(df_inc)
