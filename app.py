@@ -1,25 +1,50 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import requests
+import time
 from datetime import timedelta, datetime
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Catalyst & Flow Tracker", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Catalyst & Flow Tracker", layout="wide")
 
 # --- CUSTOM CSS FOR STYLING ---
 st.markdown("""
 <style>
+    /* Modern, elegant, minimalist styling */
     .metric-card {
-        background-color: #1E293B;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #334155;
+        background: rgba(128, 128, 128, 0.05);
+        backdrop-filter: blur(10px);
+        padding: 24px 16px;
+        border-radius: 8px;
+        border: 1px solid rgba(128, 128, 128, 0.2);
         text-align: center;
+        transition: all 0.3s ease;
     }
-    .metric-label { font-size: 14px; color: #94A3B8; margin-bottom: 5px; }
-    .metric-value { font-size: 24px; font-weight: bold; color: #F8FAFC; }
-    .pos-return { color: #34D399 !important; }
-    .neg-return { color: #F87171 !important; }
+    .metric-card:hover {
+        border-color: rgba(128, 128, 128, 0.4);
+    }
+    .metric-label { 
+        font-size: 11px; 
+        text-transform: uppercase; 
+        letter-spacing: 1.5px; 
+        color: #888888; 
+        margin-bottom: 8px; 
+        font-weight: 600;
+    }
+    .metric-value { 
+        font-size: 28px; 
+        font-weight: 300; 
+        letter-spacing: -0.5px; 
+    }
+    .pos-return { color: #5C946E !important; } /* Muted sage green */
+    .neg-return { color: #C96464 !important; } /* Muted rose red */
+    
+    /* Clean up default Streamlit elements */
+    h1, h2, h3 {
+        font-weight: 400 !important;
+        letter-spacing: -0.5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -27,21 +52,37 @@ st.markdown("""
 class IPOCatalystTracker:
     def __init__(self, ticker):
         self.ticker = ticker.upper()
-        self.stock = yf.Ticker(self.ticker)
+        
+        # Create a custom session to bypass Yahoo's bot-blocking rate limits
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive"
+        })
+        
+        self.stock = yf.Ticker(self.ticker, session=self.session)
         self.stock_info = {}
         self.ipo_date = None
         self.current_year = datetime.now().year
 
     def fetch_data(self):
-        try:
-            self.stock_info = self.stock.info
-            hist = self.stock.history(period="max")
-            if hist.empty:
-                return False, f"No trading data found for {self.ticker}."
-            self.ipo_date = hist.index.min().date()
-            return True, "Success"
-        except Exception as e:
-            return False, f"Error: {str(e)}"
+        # Added a 3-attempt retry loop just in case Yahoo is being extra stubborn
+        for attempt in range(3):
+            try:
+                self.stock_info = self.stock.info
+                hist = self.stock.history(period="max")
+                if hist.empty:
+                    return False, f"No trading data found for {self.ticker}."
+                self.ipo_date = hist.index.min().date()
+                return True, "Success"
+            except Exception as e:
+                if "Too Many Requests" in str(e) or "Rate limited" in str(e) or "429" in str(e):
+                    if attempt < 2:
+                        time.sleep(2) # Backoff before retrying
+                        continue
+                return False, f"Error: {str(e)}\n\n(Yahoo Finance might be temporarily blocking the server IP. Try again in a few minutes.)"
 
     def get_metrics(self):
         current_price = self.stock_info.get('currentPrice', self.stock_info.get('regularMarketPrice', 0))
@@ -77,8 +118,9 @@ class IPOCatalystTracker:
         }
 
 # --- UI LAYOUT ---
-st.title("📈 Post-IPO Catalyst & Flow Tracker")
-st.markdown("Predictive Index Inclusion & IPO Lock-up Mapping")
+st.title("Post-IPO Catalyst & Flow Tracker")
+st.markdown("<p style='color: #888; font-size: 16px; font-weight: 300;'>Predictive Index Inclusion & IPO Lock-up Mapping</p>", unsafe_allow_html=True)
+st.write("") # Spacing
 
 ticker_input = st.text_input("Enter Ticker (e.g. EIKN, ARM, AAPL)", "")
 
@@ -98,10 +140,12 @@ if ticker_input:
             
             days_public = (datetime.now().date() - tracker.ipo_date).days
             is_mature = days_public > 365
-            status_badge = "🟢 Mature Company" if is_mature else "🔵 Recent IPO"
+            status_badge = "Mature Company" if is_mature else "Recent IPO"
 
+            st.write("---")
+            
             # Top Row: Info & Prices
-            col1, col2 = st.columns([1, 1.5])
+            col1, col2 = st.columns([1, 2])
             
             with col1:
                 st.subheader(f"{tracker.ticker} Profile")
@@ -115,41 +159,41 @@ if ticker_input:
                 st.subheader("Price & Performance")
                 cp, pc, ytd, oyr, ytd_v, oyr_v = tracker.get_metrics()
                 
-                m1, m2 = st.columns(2)
-                m3, m4 = st.columns(2)
+                m1, m2, m3, m4 = st.columns(4)
                 
                 m1.metric("Current Price", f"${cp:.2f}" if cp else "N/A", f"{cp - pc:+.2f}" if cp and pc else None)
                 m2.metric("Previous Close", f"${pc:.2f}" if pc else "N/A")
                 m3.metric("YTD Return", ytd)
                 m4.metric("1-Year Return", oyr)
 
-            st.divider()
+            st.write("---")
 
             # Middle Row: Deadlines
-            st.subheader("🗓️ Mechanical & Regulatory Deadlines")
+            st.subheader("Mechanical & Regulatory Deadlines")
+            st.write("")
             deadlines = tracker.get_mechanical_deadlines()
             
             d_cols = st.columns(3)
             for idx, (event, date) in enumerate(deadlines.items()):
                 passed = date < datetime.now().date()
-                status = "PASSED" if passed else "UPCOMING"
-                color = "grey" if passed else "green"
+                status = "Passed" if passed else "Upcoming"
+                color = "#888888" if passed else "#5C946E"
                 
                 with d_cols[idx]:
                     st.markdown(f"""
                     <div class="metric-card">
                         <div class="metric-label">{event}</div>
                         <div class="metric-value">{date.strftime('%b %d, %Y')}</div>
-                        <div style="color: {color}; font-size: 12px; font-weight: bold; margin-top: 5px;">{status}</div>
+                        <div style="color: {color}; font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; margin-top: 12px;">{status}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
-            st.divider()
+            st.write("---")
 
             # Bottom Row: Index Logic
             if is_mature:
-                st.subheader("🏦 Top Passive Institutional Holders")
-                st.info(f"💡 {tracker.ticker} has been public for >1 year. Mechanical lock-ups are irrelevant. The funds listed below control the daily passive flows.")
+                st.subheader("Top Passive Institutional Holders")
+                st.markdown(f"<p style='color: #888; font-size: 14px;'>{tracker.ticker} has been public for >1 year. Mechanical lock-ups are irrelevant. The funds listed below control the daily passive flows.</p>", unsafe_allow_html=True)
                 
                 funds = tracker.stock.mutualfund_holders
                 if funds is not None and not funds.empty:
@@ -160,7 +204,8 @@ if ticker_input:
                 else:
                     st.warning("Fund data temporarily unavailable.")
             else:
-                st.subheader("🎯 Predictive Index Inclusion Targets")
+                st.subheader("Predictive Index Inclusion Targets")
+                st.write("")
                 
                 inclusions = []
                 ipo_month = tracker.ipo_date.month
