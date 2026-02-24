@@ -134,7 +134,17 @@ st.title("Post-IPO Catalyst & Flow Tracker")
 st.markdown("<p style='color: #888; font-size: 16px; font-weight: 300;'>Predictive Index Inclusion & IPO Lock-up Mapping</p>", unsafe_allow_html=True)
 st.write("") # Spacing
 
-ticker_input = st.text_input("Enter Ticker (e.g. EIKN, ARM, AAPL)", "")
+# Add a two-column layout for the search bar and the new sector override
+col_search, col_override = st.columns([2, 1])
+
+with col_search:
+    ticker_input = st.text_input("Enter Ticker (e.g. EIKN, ARM, AAPL)", "")
+
+with col_override:
+    sector_override = st.selectbox(
+        "Sector (Use if Auto-Detect fails)", 
+        ["Auto-Detect", "Healthcare / Biotech", "Technology / Growth", "Other"]
+    )
 
 if ticker_input:
     with st.spinner(f"Pulling live market data for {ticker_input.upper()}..."):
@@ -147,6 +157,11 @@ if ticker_input:
             # 1. Profile Data
             sector = tracker.stock_info.get('sector', 'Unknown')
             industry = tracker.stock_info.get('industry', 'Unknown')
+            
+            # Apply Sector Override visually if user selected one
+            display_sector = sector
+            if sector == 'Unknown' and sector_override != "Auto-Detect":
+                display_sector = f"Manual: {sector_override}"
             
             # Try stock_info first, fallback to fast_info to bypass block
             mcap = tracker.stock_info.get('marketCap', 0)
@@ -171,7 +186,7 @@ if ticker_input:
                 st.subheader(f"{tracker.ticker} Profile")
                 st.caption(tracker.stock_info.get('shortName', 'Company Name'))
                 st.markdown(f"**Status:** {status_badge}")
-                st.markdown(f"**Sector:** {sector}")
+                st.markdown(f"**Sector:** {display_sector}")
                 st.markdown(f"**Industry:** {industry}")
                 st.markdown(f"**Est. Market Cap:** {mcap_str}")
                 
@@ -240,10 +255,22 @@ if ticker_input:
                 inclusions.append({"Index": "MSCI USA IMI", "Target": "Next Index Review", "Prob": "High" if mcap >= 1e9 else "Medium"})
                 inclusions.append({"Index": "S&P Composite 1500", "Target": f"After {(tracker.ipo_date + timedelta(days=365)).strftime('%b %Y')}", "Prob": "Low"})
                 
-                if sector == 'Healthcare' or 'Biotech' in industry:
+                # Dynamic Logic based on user override or auto-detect
+                is_biotech = False
+                is_tech = False
+                
+                if sector_override == "Healthcare / Biotech":
+                    is_biotech = True
+                elif sector_override == "Technology / Growth":
+                    is_tech = True
+                elif sector_override == "Auto-Detect":
+                    is_biotech = sector == 'Healthcare' or 'Biotech' in industry or 'Pharmaceutical' in industry
+                    is_tech = sector in ['Technology', 'Communication Services', 'Consumer Discretionary']
+
+                if is_biotech:
                     inclusions.append({"Index": "S&P Biotech (XBI)", "Target": "Next Quarterly Rebalance", "Prob": "High"})
                     inclusions.append({"Index": "Nasdaq Biotech (NBI)", "Target": "December (Annual)", "Prob": "High"})
-                else:
+                elif is_tech or (not is_biotech and sector_override == "Auto-Detect"):
                     inclusions.append({"Index": "Nasdaq 100 (QQQ)", "Target": "Standard or Fast Entry (15 Days)", "Prob": "Varies"})
 
                 df_inc = pd.DataFrame(inclusions)
