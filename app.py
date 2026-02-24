@@ -55,52 +55,61 @@ class IPOCatalystTracker:
         # We now let yfinance handle the session mapping natively to avoid the curl_cffi error
         self.stock = yf.Ticker(self.ticker)
         self.stock_info = {}
+        self.hist_max = pd.DataFrame()
         self.ipo_date = None
         self.current_year = datetime.now().year
 
     def fetch_data(self):
-        # Added a 3-attempt retry loop just in case Yahoo is being extra stubborn
-        for attempt in range(3):
-            try:
-                # yfinance sometimes returns None instead of a dictionary if data is missing/blocked. 
-                # We force it to be an empty dict to prevent AttributeError crashes.
-                info = self.stock.info
-                self.stock_info = info if info is not None else {}
+        try:
+            # The screenshot proves Yahoo allows the .history() chart endpoint, but blocks the .info endpoint!
+            # So we fetch historical data first and use it as our absolute source of truth for pricing.
+            self.hist_max = self.stock.history(period="max")
+            
+            if self.hist_max.empty:
+                return False, f"No trading data found for {self.ticker}."
                 
-                hist = self.stock.history(period="max")
-                if hist.empty:
-                    return False, f"No trading data found for {self.ticker}."
-                self.ipo_date = hist.index.min().date()
-                return True, "Success"
-            except Exception as e:
-                if "Too Many Requests" in str(e) or "Rate limited" in str(e) or "429" in str(e):
-                    if attempt < 2:
-                        time.sleep(2) # Backoff before retrying
-                        continue
-                return False, f"Error: {str(e)}\n\n(Yahoo Finance might be temporarily blocking the server IP. Try again in a few minutes.)"
+            self.ipo_date = self.hist_max.index.min().date()
+            
+            # Put .info in a silent try/except. If Yahoo rate-limits it, we just ignore it!
+            try:
+                self.stock_info = self.stock.info or {}
+            except:
+                self.stock_info = {}
+                
+            return True, "Success"
+        except Exception as e:
+            return False, f"Data fetch error: {str(e)}"
 
     def get_metrics(self):
-        current_price = self.stock_info.get('currentPrice', self.stock_info.get('regularMarketPrice', 0))
-        prev_close = self.stock_info.get('previousClose', 0)
+        # We derive ALL pricing mathematically from the historical chart, completely bypassing the blocked .info endpoint
+        if self.hist_max.empty:
+            return 0, 0, "N/A", "N/A", 0, 0
+            
+        current_price = self.hist_max['Close'].iloc[-1]
+        prev_close = self.hist_max['Close'].iloc[-2] if len(self.hist_max) > 1 else current_price
         
-        hist_ytd = self.stock.history(period="ytd")
-        hist_1y = self.stock.history(period="1y")
-        
-        ytd_return = one_yr_return = "N/A"
-        ytd_val = one_yr_val = 0
-        
-        if not hist_ytd.empty and current_price:
-            first_ytd = hist_ytd['Close'].iloc[0]
+        # YTD calculation
+        ytd_data = self.hist_max[self.hist_max.index.year == self.current_year]
+        if not ytd_data.empty:
+            first_ytd = ytd_data['Close'].iloc[0]
             ytd_val = ((current_price - first_ytd) / first_ytd) * 100
             ytd_return = f"{ytd_val:+.2f}%"
+        else:
+            ytd_val = 0
+            ytd_return = "N/A"
             
-        if not hist_1y.empty and current_price:
-            first_1y = hist_1y['Close'].iloc[0]
+        # 1-Year calculation
+        one_year_ago = pd.Timestamp.now(tz=self.hist_max.index.tz) - pd.Timedelta(days=365)
+        past_data = self.hist_max[self.hist_max.index <= one_year_ago]
+        
+        if not past_data.empty:
+            first_1y = past_data['Close'].iloc[-1]
             one_yr_val = ((current_price - first_1y) / first_1y) * 100
-            if len(hist_1y) >= 250:
-                one_yr_return = f"{one_yr_val:+.2f}%"
-            else:
-                one_yr_return = f"{one_yr_val:+.2f}% (Since IPO)"
+            one_yr_return = f"{one_yr_val:+.2f}%" if len(self.hist_max) >= 250 else f"{one_yr_val:+.2f}% (Since IPO)"
+        else:
+            first_ipo = self.hist_max['Close'].iloc[0]
+            one_yr_val = ((current_price - first_ipo) / first_ipo) * 100
+            one_yr_return = f"{one_yr_val:+.2f}% (Since IPO)"
 
         return current_price, prev_close, ytd_return, one_yr_return, ytd_val, one_yr_val
 
@@ -138,7 +147,15 @@ if ticker_input:
             # 1. Profile Data
             sector = tracker.stock_info.get('sector', 'Unknown')
             industry = tracker.stock_info.get('industry', 'Unknown')
+            
+            # Try stock_info first, fallback to fast_info to bypass block
             mcap = tracker.stock_info.get('marketCap', 0)
+            if not mcap:
+                try:
+                    mcap = tracker.stock.fast_info['marketCap']
+                except:
+                    mcap = 0
+                    
             mcap_str = f"${mcap / 1e9:.2f}B" if mcap else "Unknown"
             
             days_public = (datetime.now().date() - tracker.ipo_date).days
